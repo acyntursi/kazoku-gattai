@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>家族合体</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700&display=swap');
+  :root { --bg:#fff0f3; --board:#ffe1e8; --ink:#8a5a64; --accent:#ff9db1; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; min-height:100vh; background:linear-gradient(#fff0f3,#f3f0ff); color:var(--ink);
+         font-family:"Zen Maru Gothic","Hiragino Maru Gothic ProN","Yu Gothic",sans-serif;
+         display:flex; flex-direction:column; align-items:center; padding:12px; gap:10px; }
+  h1 { margin:0; font-size:1.5rem; }
+  .bar { width:min(96vw,520px); display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .box { background:var(--board); border-radius:16px; padding:5px 12px; text-align:center; font-size:.72rem; }
+  .box b { display:block; font-size:1.15rem; }
+  .next { display:flex; align-items:center; gap:6px; }
+  .next span { font-size:1.6rem; line-height:1; }
+  button { font:inherit; font-weight:700; border:0; border-radius:999px; padding:8px 16px; background:var(--accent); color:#fff; cursor:pointer;
+           box-shadow:0 3px 0 #f07f98; }
+  button:active { transform:translateY(2px); box-shadow:0 1px 0 #f07f98; }
+  #wrap { position:relative; width:min(96vw,520px); }
+  #timer { height:8px; background:var(--board); border-radius:4px; overflow:hidden; margin-bottom:6px; }
+  #timer i { display:block; height:100%; width:100%; background:var(--accent); }
+  canvas { width:100%; display:block; border-radius:24px; background:linear-gradient(#eaf6ff,#fdf0f7); border:5px solid #fff;
+           box-shadow:0 6px 18px #e0a6b455; touch-action:none; cursor:crosshair; }
+  #msg { position:absolute; inset:0; background:rgba(255,240,243,.92); border-radius:24px; display:none;
+         flex-direction:column; align-items:center; justify-content:center; gap:12px; font-size:1.4rem; text-align:center; }
+  .head { display:flex; align-items:center; gap:12px; }
+  button.icon { padding:4px 10px; font-size:1.1rem; background:#fff; color:inherit; box-shadow:0 2px 0 #f0c0cc; }
+  .btns { display:flex; gap:10px; }
+  #msg small { font-size:.85rem; }
+  .win-emoji { font-size:5.5rem; line-height:1.1; display:inline-block; animation:bounce 1s ease-in-out infinite; }
+  @keyframes bounce { 0%,100% { transform:translateY(0) rotate(-4deg); } 50% { transform:translateY(-14px) rotate(4deg); } }
+  .chain { width:min(96vw,520px); background:var(--board); border-radius:20px; padding:8px; }
+  .chain small { display:block; text-align:center; font-size:.7rem; margin-bottom:4px; }
+  .chain div { display:flex; flex-wrap:wrap; justify-content:center; gap:4px 6px; font-size:1.5rem; line-height:1.2; }
+  .hint { font-size:.72rem; opacity:.8; }
+</style>
+</head>
+<body>
+<div class="head"><h1>家族合体</h1><button id="mute" class="icon" title="音のオン/オフ">🔊</button><button id="pause" class="icon" title="一時停止 (Pキー)">⏸</button></div>
+<div class="bar">
+  <div class="box">スコア<b id="score">0</b></div>
+  <div class="box">ベスト<b id="best">0</b></div>
+  <div class="box next">つぎ<span id="next"></span></div>
+  <button id="reset">はじめから</button>
+</div>
+<div id="wrap">
+  <div id="timer"><i></i></div>
+  <canvas id="cv"></canvas>
+  <div id="msg"><div id="msgText"></div>
+    <div class="btns"><button id="cont">つづける</button><button id="again">もういちど</button></div></div>
+</div>
+<div class="hint">マウス/指で位置を決めて、クリック/離すと落下(7秒で自動落下)。←→キー+スペースでもOK</div><div class="chain"><small>合体の順番</small><div id="chain"></div></div>
+
+<script src="matter.min.js"></script>
+<script>
+// ===== 設定 =====
+const W = 560, H = 760, LINE = 150, DROP_Y = 70;
+const DROP_TIME = 7;           // 位置を決められる秒数
+const R0 = 22, R_GROW = 1.18;  // 一番小さい子の半径、段階ごとの大きくなる倍率
+const CHAIN = [ // 合体の順番(小さい順)
+  {e:"👶", n:"赤ちゃん", c:"#ffe3ea"},
+  {e:"🧒", n:"こども", c:"#ffeed8"},
+  {e:"👦", n:"おとうと", c:"#fff6cc"},
+  {e:"👧", n:"いもうと", c:"#e4f5d6"},
+  {e:"🧑", n:"おにいちゃん", c:"#d9f1ee"},
+  {e:"👱‍♀️", n:"おねえちゃん", c:"#dbe8fb"},
+  {e:"👨", n:"パパ", c:"#e7defa"},
+  {e:"👩", n:"ママ", c:"#f6dcf2"},
+  {e:"👴", n:"おじいちゃん", c:"#ffd9d9"},
+  {e:"👵", n:"おばあちゃん", c:"#ffd1dc"},
+];
+const MAXLV = CHAIN.length;
+const GOAL_R = 130;            // ゴール(おばあちゃん)の半径。大きくすると、より巨大に
+const radius = lv => lv===MAXLV ? GOAL_R : R0 * Math.pow(R_GROW, lv-1);
+const $ = id => document.getElementById(id);
+const safeGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const safeSet = (k,v) => { try { localStorage.setItem(k,v); } catch {} };
+const EMOJI_FONT = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+
+const { Engine, Bodies, Body, Composite, Events } = Matter;
+function makeBody(lv,x,y){
+  const b=Bodies.circle(x,y,radius(lv),{restitution:0.2, friction:0.3, frictionStatic:0.5, frictionAir:0.005, density:0.001});
+  b.level=lv; return b;
+}
+
+// ===== 音(外部ファイルなし。ブラウザで合成) =====
+let AC=null, muted=safeGet("evolve-muted")==="1";
+function ac(){
+  if (!AC){ try { AC=new (window.AudioContext||window.webkitAudioContext)(); } catch {} }
+  if (AC && AC.state==="suspended") AC.resume();
+  return AC;
+}
+// やわらかい「ポワン」: サイン波だけ、ゆるい立ち上がり、音程がふわっと上がって落ち着く、高音をカット
+function tone(freq,t0,dur,vol,from){
+  const o=AC.createOscillator(), g=AC.createGain(), lp=AC.createBiquadFilter();
+  o.type="sine"; lp.type="lowpass"; lp.frequency.value=1800;
+  o.frequency.setValueAtTime(freq*(from||1),t0); o.frequency.exponentialRampToValueAtTime(freq,t0+0.09);
+  g.gain.setValueAtTime(0.0001,t0); g.gain.exponentialRampToValueAtTime(vol,t0+0.025); g.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
+  o.connect(lp); lp.connect(g); g.connect(AC.destination); o.start(t0); o.stop(t0+dur+0.05);
+}
+const SCALE=[0,2,4,7,9,12,14,16,19,21,24];   // 大きくなるほど高い音(ペンタトニック)
+function playMerge(lv){
+  if (muted||!ac()) return;
+  const t=AC.currentTime, f=294*Math.pow(2,SCALE[Math.min(lv,SCALE.length)-1]/12);
+  tone(f,t,0.5,0.22,0.78); tone(f*1.5,t+0.02,0.35,0.05,0.9);
+}
+function playDrop(){ if (muted||!ac()) return; tone(180,AC.currentTime,0.15,0.1,1.2); }
+function playWin(){
+  if (muted||!ac()) return;
+  [587,740,880,1175].forEach((f,i)=>tone(f,AC.currentTime+i*0.16,0.8,0.16,0.9));
+}
+function playOver(){
+  if (muted||!ac()) return;
+  [440,370,294].forEach((f,i)=>tone(f,AC.currentTime+i*0.25,0.6,0.14,1.05));
+}
+function setMuteUI(){ $("mute").textContent=muted?"🔇":"🔊"; }
+
+// ===== ゲーム状態 =====
+let engine, bodies, held, nextLv, phase, timer, wait, gt, score, best=+safeGet("evolve-best-family")||0;
+let overT, over, effects, mergeQ, keys={}, won, paused;
+const cv=$("cv"), ctx=cv.getContext("2d");
+const dpr=Math.min(2,window.devicePixelRatio||1);
+cv.width=W*dpr; cv.height=H*dpr; cv.style.aspectRatio=`${W}/${H}`;
+const pick=()=>{ const r=Math.random()*10; return r<4?1:r<7?2:r<9?3:4; };
+
+function reset(){
+  engine=Engine.create(); engine.gravity.y=0.3;
+  const wall=(x,y,w,h)=>Bodies.rectangle(x,y,w,h,{isStatic:true,friction:0.6});
+  Composite.add(engine.world,[wall(W/2,H+50,W+400,100),wall(-50,0,100,H*3),wall(W+50,0,100,H*3)]);
+  Events.on(engine,"collisionStart",e=>{
+    for (const p of e.pairs){
+      const a=p.bodyA, b=p.bodyB;
+      if (a!==b && a.level && a.level===b.level && !a.merged && !b.merged){ a.merged=b.merged=true; mergeQ.push([a,b]); }
+    }
+  });
+  mergeQ=[]; effects=[]; score=0; over=false; overT=0; gt=0; keys={}; won=false; paused=false;
+  held={level:pick(),x:W/2}; nextLv=pick(); phase="aim"; timer=DROP_TIME; wait=0;
+  $("msg").style.display="none"; updateHud();
+}
+function updateHud(){ $("score").textContent=score; $("best").textContent=best; $("next").textContent=CHAIN[nextLv-1].e; }
+function clampX(x,lv){ const h=radius(lv)+2; return Math.max(h,Math.min(W-h,x)); }
+function showMsg(html, canContinue){
+  $("msgText").innerHTML=html; $("cont").style.display=canContinue?"":"none"; $("msg").style.display="flex";
+}
+function showWin(){
+  playWin();
+  showMsg(`<span class="win-emoji">${CHAIN[MAXLV-1].e}</span><br>🎉 おめでとう! 🎉<br><small>おばあちゃんになったよ</small><br><small>スコア ${score}</small>`, true);
+}
+function drop(){
+  if (phase!=="aim"||over||paused) return;
+  const b=makeBody(held.level,clampX(held.x,held.level),DROP_Y);
+  b.born=gt; Composite.add(engine.world,b); playDrop();
+  phase="wait"; wait=0.6;
+}
+function doMerges(){
+  while (mergeQ.length){
+    const [a,b]=mergeQ.pop();
+    Composite.remove(engine.world,[a,b]);
+    const x=(a.position.x+b.position.x)/2, y=(a.position.y+b.position.y)/2;
+    effects.push({x,y,t:0,r:radius(a.level)});
+    if (a.level>=MAXLV){ score+=200; effects.push({x,y,t:0,r:200}); playWin(); }  // おばあちゃん同士は消える
+    else {
+      if (a.level+1<MAXLV) playMerge(a.level+1);
+      const nb=makeBody(a.level+1,x,y); nb.born=gt;
+      Body.setVelocity(nb,{x:0,y:-1}); Composite.add(engine.world,nb);
+      score+=(a.level+1)*(a.level+1);
+      if (a.level+1===MAXLV && !won){
+        won=true; paused=true; showWin();
+      }
+    }
+    if (score>best){ best=score; safeSet("evolve-best-family",best); }
+    updateHud();
+  }
+}
+
+// ===== 描画 =====
+function drawPiece(lv,x,y,angle,alpha){
+  const r=radius(lv), it=CHAIN[lv-1];
+  ctx.save(); ctx.globalAlpha=alpha; ctx.translate(x,y); ctx.rotate(angle);
+  ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
+  ctx.fillStyle=it.c; ctx.fill();
+  ctx.lineWidth=3; ctx.strokeStyle="#fff"; ctx.stroke();
+  ctx.font=`${r*1.15}px ${EMOJI_FONT}`; ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillStyle="#000"; ctx.fillText(it.e,0,r*0.06);
+  ctx.restore();
+}
+function render(){
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+  ctx.setLineDash([10,8]); ctx.strokeStyle=overT>0?"#ff6f8e":"#ff9db199"; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,LINE); ctx.lineTo(W,LINE); ctx.stroke(); ctx.setLineDash([]);
+  for (const b of Composite.allBodies(engine.world)) if (b.level) drawPiece(b.level,b.position.x,b.position.y,b.angle,1);
+  if (phase==="aim" && !over){
+    const x=clampX(held.x,held.level);
+    ctx.setLineDash([4,6]); ctx.strokeStyle="#d9a6b455"; ctx.beginPath(); ctx.moveTo(x,DROP_Y); ctx.lineTo(x,H); ctx.stroke(); ctx.setLineDash([]);
+    drawPiece(held.level,x,DROP_Y,0,0.95);
+  }
+  for (const e of effects){ const k=e.t/0.4; ctx.strokeStyle=`rgba(255,143,163,${1-k})`; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.arc(e.x,e.y,e.r*(0.5+k),0,Math.PI*2); ctx.stroke(); }
+}
+
+// ===== メインループ =====
+let last=performance.now(), acc=0;
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  if (!over && !paused){
+    acc+=dt;
+    for (let n=0; acc>=1/120 && n<4; n++){ Engine.update(engine,1000/120); acc-=1/120; gt+=1/120; doMerges(); }
+    if (acc>1/120) acc=0;
+    if (phase==="aim"){
+      if (keys.ArrowLeft) held.x-=300*dt; if (keys.ArrowRight) held.x+=300*dt;
+      held.x=clampX(held.x,held.level);
+      timer-=dt; if (timer<=0) drop();
+    } else { wait-=dt; if (wait<=0){ held={level:nextLv,x:held.x}; nextLv=pick(); phase="aim"; timer=DROP_TIME; updateHud(); } }
+    $("timer").firstElementChild.style.width=(phase==="aim"?timer/DROP_TIME*100:0)+"%";
+    // ゲームオーバー判定: 落ち着いた子がラインを超え続ける
+    let danger=false;
+    for (const b of Composite.allBodies(engine.world)) if (b.level && gt-b.born>1.5 && b.bounds.min.y<LINE) danger=true;
+    overT=danger?overT+dt:0;
+    if (overT>2.5){ over=true; playOver(); showMsg(`ゲームオーバー<br>スコア ${score}`, false); }
+  }
+  effects.forEach(e=>e.t+=dt); effects=effects.filter(e=>e.t<0.4);
+  render();
+}
+
+// ===== 入力 =====
+function pointerX(e){ const r=cv.getBoundingClientRect(); return (e.clientX-r.left)*W/r.width; }
+cv.addEventListener("pointermove",e=>{ held.x=pointerX(e); });
+cv.addEventListener("pointerdown",e=>{ held.x=pointerX(e); });
+cv.addEventListener("pointerup",e=>{ held.x=pointerX(e); drop(); });
+document.addEventListener("keydown",e=>{
+  if (e.key===" "||e.key==="Enter"||e.key==="ArrowDown"){ e.preventDefault(); drop(); }
+  if (e.key==="ArrowLeft"||e.key==="ArrowRight"){ e.preventDefault(); keys[e.key]=true; }
+});
+document.addEventListener("keyup",e=>{ keys[e.key]=false; });
+$("mute").onclick=()=>{ muted=!muted; safeSet("evolve-muted",muted?"1":"0"); setMuteUI(); if (!muted) playMerge(3); };
+setMuteUI();
+// ブラウザの仕様で、最初の操作のあとに音が使えるようになる
+["pointerdown","keydown"].forEach(ev=>document.addEventListener(ev,()=>{ if (!muted) ac(); },{once:false}));
+$("reset").onclick=reset; $("again").onclick=reset;$("cont").onclick=()=>{ $("msg").style.display="none"; paused=false; };
+function togglePause(){
+  if (over) return;
+  if (paused){ $("cont").click(); }
+  else { paused=true; showMsg(`<span class="win-emoji" style="animation:none">⏸</span><br>一時停止中`, true); }
+}
+$("pause").onclick=togglePause;
+// タブを切り替えたり、ウィンドウが隠れたら自動で一時停止(戻っても自動再開はしない)
+document.addEventListener("visibilitychange",()=>{ if (document.hidden && !paused && !over) togglePause(); });
+document.addEventListener("keydown",e=>{ if (e.key==="p"||e.key==="P"||e.key==="Escape") togglePause(); });$("chain").innerHTML=CHAIN.map(c=>`<span title="${c.n}">${c.e}</span>`).join("→");
+
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
